@@ -1,0 +1,23 @@
+﻿# Environment variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+
+# Output files
+melbourne_events_*.txt
+
+# OS
+.DS_Store
+Thumbs.db
