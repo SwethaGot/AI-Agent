@@ -9,6 +9,6 @@ from langchain_core.output_parsers import PydanticOutputParser
 
 load_dotenv()
 
-llm = ChatAnthropic(model="claude-3-5-sonnet-2024")
+llm = ChatAnthropic(model="claude-sonnet-4-5-20250929")
 response = llm.invoke("What is a TV?")
 print(response)      
