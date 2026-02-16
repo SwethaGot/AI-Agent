@@ -1,7 +1,18 @@
-from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_core.tools import tool
 from datetime import datetime
 import time
+
+# Try different DuckDuckGo imports
+try:
+    from ddgs import DDGS
+    use_ddgs_direct = True
+except ImportError:
+    try:
+        from langchain_community.tools import DuckDuckGoSearchRun
+        use_ddgs_direct = False
+    except ImportError:
+        raise ImportError("Please install duckduckgo-search: pip install duckduckgo-search")
+
 
 # TOOL 1: EVENT SEARCH
 @tool
@@ -13,7 +24,6 @@ def search_local_events(query: str) -> str:
     Returns:
         String with search results
     """
-    search = DuckDuckGoSearchRun()
     city = "Melbourne"
     
     # Create targeted search queries for Melbourne
@@ -26,13 +36,28 @@ def search_local_events(query: str) -> str:
     ]
     
     results = []
-    for search_query in search_queries:
-        try:
-            result = search.run(search_query)
-            results.append(f"Search Query: {search_query}\n\nResults:\n{result}")
-            time.sleep(1)  # Avoid rate limiting
-        except Exception as e:
-            results.append(f"Search failed for '{search_query}': {str(e)}")
+    
+    if use_ddgs_direct:
+        # Use DDGS directly
+        ddgs = DDGS()
+        for search_query in search_queries:
+            try:
+                search_results = ddgs.text(search_query, max_results=5)
+                formatted_results = "\n".join([f"- {r['title']}: {r['body']}" for r in search_results])
+                results.append(f"Search Query: {search_query}\n\nResults:\n{formatted_results}")
+                time.sleep(1)
+            except Exception as e:
+                results.append(f"Search failed for '{search_query}': {str(e)}")
+    else:
+        # Use LangChain wrapper
+        search = DuckDuckGoSearchRun()
+        for search_query in search_queries:
+            try:
+                result = search.run(search_query)
+                results.append(f"Search Query: {search_query}\n\nResults:\n{result}")
+                time.sleep(1)
+            except Exception as e:
+                results.append(f"Search failed for '{search_query}': {str(e)}")
     
     return "\n\n" + "="*60 + "\n\n".join(results)
 
@@ -47,8 +72,6 @@ def search_melbourne_news(topic: str) -> str:
     Returns:
         String with news results
     """
-    search = DuckDuckGoSearchRun()
-    
     # Melbourne-specific news queries
     news_queries = [
         f"Melbourne Australia {topic} news today",
@@ -57,13 +80,28 @@ def search_melbourne_news(topic: str) -> str:
     ]
     
     results = []
-    for news_query in news_queries:
-        try:
-            result = search.run(news_query)
-            results.append(f"News Search: {news_query}\n\nResults:\n{result}")
-            time.sleep(1)
-        except Exception as e:
-            results.append(f"News search failed for '{news_query}': {str(e)}")
+    
+    if use_ddgs_direct:
+        # Use DDGS directly
+        ddgs = DDGS()
+        for news_query in news_queries:
+            try:
+                search_results = ddgs.text(news_query, max_results=5)
+                formatted_results = "\n".join([f"- {r['title']}: {r['body']}" for r in search_results])
+                results.append(f"News Search: {news_query}\n\nResults:\n{formatted_results}")
+                time.sleep(1)
+            except Exception as e:
+                results.append(f"News search failed for '{news_query}': {str(e)}")
+    else:
+        # Use LangChain wrapper
+        search = DuckDuckGoSearchRun()
+        for news_query in news_queries:
+            try:
+                result = search.run(news_query)
+                results.append(f"News Search: {news_query}\n\nResults:\n{result}")
+                time.sleep(1)
+            except Exception as e:
+                results.append(f"News search failed for '{news_query}': {str(e)}")
     
     return "\n\n" + "="*60 + "\n\n".join(results)
 
