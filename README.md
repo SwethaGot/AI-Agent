@@ -2,7 +2,7 @@
 
 AI-powered agent that discovers local events and news in Melbourne, Australia using Claude AI and LangChain.
 
-🌐 **Live Demo:** []
+🌐 **Live Demo:** [https://melbourneeventdiscoveryagent.streamlit.app/]
 
 ## Features
 
@@ -279,15 +279,15 @@ melbourne-event-agent/
 
 ### Use the Live App
 
-Visit: []
+Visit: [https://melbourneeventdiscoveryagent.streamlit.app/]
 
 ### Run Locally
 
 1. **Clone and install**
 
 ```bash
-   git clone https://github.com/YOUR_USERNAME/melbourne-event-agent.git
-   cd melbourne-event-agent
+   git clone https://github.com/SwethaGot/AI-agent.git
+   cd AI-agent
    pip install -r requirements.txt
 ```
 
