@@ -19,6 +19,7 @@ class MelbourneDiscoveryResponse(BaseModel):
     recommendations: list[str]
     budget_friendly_options: list[str]
     friend_group_suggestions: list[str]
+    sources: list[str]
     tools_used: list[str]
 
 
@@ -27,7 +28,7 @@ class MelbourneDiscoveryResponse(BaseModel):
 def init_llm():
     llm = ChatAnthropic(model="claude-sonnet-4-5-20250929")
     parser = PydanticOutputParser(pydantic_object=MelbourneDiscoveryResponse)
-    
+
     system_prompt = """
     You are an intelligent Local Event and News Discovery Assistant for Melbourne, Australia.
 
@@ -60,14 +61,22 @@ def init_llm():
     3. Analyze budget with analyze_event_budget
     4. Save results using save_events
 
-    After gathering all information, provide a comprehensive response with event details, news highlights, recommendations, and friend group suggestions.
+    IMPORTANT FOR SOURCES:
+    - Extract ALL URLs from the tool results
+    - Include them in the sources field
+    - Format each source as: [Title](URL)
+    - Only include genuine URLs from search results
+    - Never make up or guess URLs
+
+    After gathering all information, provide a comprehensive response with event details,
+    news highlights, recommendations, friend group suggestions and genuine source links.
 
     {format_instructions}
     """
-    
+
     tools = [event_search_tool, news_search_tool, save_tool, budget_tool]
     llm_with_tools = llm.bind_tools(tools)
-    
+
     return llm, llm_with_tools, parser, system_prompt, tools
 
 
@@ -77,21 +86,21 @@ llm, llm_with_tools, parser, system_prompt, tools = init_llm()
 # Agent function
 def run_agent(query: str):
     """Simple agent that calls tools and processes results"""
-    
+
     # First call to decide which tools to use
     response = llm_with_tools.invoke([
         ("system", system_prompt.format(format_instructions=parser.get_format_instructions())),
         ("human", query)
     ])
-    
+
     results = []
-    
+
     # Check if tools were called
     if hasattr(response, 'tool_calls') and response.tool_calls:
         for tool_call in response.tool_calls:
             tool_name = tool_call.get('name', '')
             tool_args = tool_call.get('args', {})
-            
+
             # Find and execute the tool
             for tool in tools:
                 if tool.name == tool_name:
@@ -102,25 +111,30 @@ def run_agent(query: str):
                         error_msg = f"Error with {tool_name}: {str(e)}"
                         results.append(error_msg)
                     break
-    
+
     # Combine all results
     combined_results = "\n\n".join(results) if results else "No tools were executed."
-    
+
     # Second call to generate final structured response
     final_prompt = f"""
-Based on the following tool results, provide a comprehensive answer about Melbourne events and news.
+Based on the following tool results, provide a comprehensive answer about 
+Melbourne events and news.
 
 Tool Results:
 {combined_results}
 
 Original Query: {query}
 
+IMPORTANT: Extract all URLs from the tool results and include them in the
+sources field formatted as [Title](URL). Only use URLs that appear in the
+tool results, never make up URLs.
+
 Please provide a detailed response in the following JSON format:
 {parser.get_format_instructions()}
 """
-    
+
     final_response = llm.invoke(final_prompt)
-    
+
     return final_response.content
 
 
@@ -159,6 +173,11 @@ st.markdown("""
     .stButton>button:hover {
         background-color: #1E40AF;
     }
+    .source-link {
+        padding: 0.5rem;
+        border-radius: 0.3rem;
+        margin: 0.3rem 0;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -175,10 +194,11 @@ with st.sidebar:
     - 📰 Melbourne news updates
     - 💰 Budget-friendly options
     - 👥 Friend group suggestions
+    - 🔗 Genuine links to sources
     """)
-    
+
     st.divider()
-    
+
     st.header("🔧 How It Works")
     st.write("""
     1. Choose what to search for
@@ -187,19 +207,19 @@ with st.sidebar:
     4. Click Search
     5. Get AI-powered recommendations!
     """)
-    
+
     st.divider()
-    
+
     st.header("💡 Tips")
     st.write("""
     - Be specific with event types
     - Try budget $0 for free events
     - Check 'Both' for complete info
-    - Results are saved to files
+    - Click source links to verify details
     """)
-    
+
     st.divider()
-    
+
     st.caption("Powered by Claude AI & LangChain")
 
 # Main content
@@ -257,7 +277,7 @@ st.divider()
 
 # Search button
 if st.button("🔍 Search", type="primary", use_container_width=True):
-    
+
     # Validate inputs
     if search_type == "Events" and not event_type:
         st.error("Please enter an event type!")
@@ -273,42 +293,43 @@ if st.button("🔍 Search", type="primary", use_container_width=True):
             query = f"Find latest news about {news_topic} in Melbourne Australia"
         else:
             query = f"Find {event_type} events in Melbourne Australia with budget under ${budget} AUD and also provide latest {news_topic} news in Melbourne"
-        
+
         # Show query
         with st.expander("📝 Search Query"):
             st.code(query)
-        
+
         # Run agent with loading spinner
         with st.spinner("🤖 AI Agent is searching... This may take 10-20 seconds"):
             try:
                 output = run_agent(query)
-                
+
                 # Parse response
                 try:
                     structured_response = parser.parse(output)
-                    
+
                     # Success message
                     st.success("✅ Search complete!")
-                    
+
                     st.divider()
-                    
+
                     # Display results in tabs
-                    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-                        "📅 Events", 
-                        "📰 News", 
-                        "⭐ Recommendations", 
-                        "💵 Budget Options", 
-                        "👥 Friend Suggestions"
+                    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+                        "📅 Events",
+                        "📰 News",
+                        "⭐ Recommendations",
+                        "💵 Budget Options",
+                        "👥 Friend Suggestions",
+                        "🔗 Sources"
                     ])
-                    
+
                     with tab1:
                         st.subheader(f"Events Found ({len(structured_response.events_found)})")
                         if structured_response.events_found:
                             for i, event in enumerate(structured_response.events_found, 1):
                                 st.write(f"{i}. {event}")
                         else:
-                            st.info("No specific events found. Check recommendations for suggestions!")
-                    
+                            st.info("No specific events found. Check recommendations!")
+
                     with tab2:
                         st.subheader(f"News Highlights ({len(structured_response.news_highlights)})")
                         if structured_response.news_highlights:
@@ -316,12 +337,12 @@ if st.button("🔍 Search", type="primary", use_container_width=True):
                                 st.write(f"{i}. {news}")
                         else:
                             st.info("No news highlights available.")
-                    
+
                     with tab3:
                         st.subheader("Top Recommendations")
                         for i, rec in enumerate(structured_response.recommendations, 1):
                             st.write(f"{i}. {rec}")
-                    
+
                     with tab4:
                         st.subheader("Budget-Friendly Options")
                         if structured_response.budget_friendly_options:
@@ -329,22 +350,32 @@ if st.button("🔍 Search", type="primary", use_container_width=True):
                                 st.write(f"{i}. {option}")
                         else:
                             st.info("No specific budget options found.")
-                    
+
                     with tab5:
                         st.subheader("Friend Group Suggestions")
                         for i, suggestion in enumerate(structured_response.friend_group_suggestions, 1):
                             st.write(f"{i}. {suggestion}")
-                    
+
+                    with tab6:
+                        st.subheader("Sources & Links")
+                        st.caption("Click any link to visit the original source")
+                        if structured_response.sources:
+                            for i, source in enumerate(structured_response.sources, 1):
+                                # Render as clickable markdown link
+                                st.markdown(f"{i}. {source}")
+                        else:
+                            st.info("No sources available for this search.")
+
                     # Footer info
                     st.divider()
                     st.caption(f"🔧 Tools used: {', '.join(structured_response.tools_used)}")
                     st.caption(f"📍 City: {structured_response.city}")
-                    
+
                 except Exception as parse_error:
                     st.warning("⚠️ Could not parse structured response. Showing raw output:")
                     st.text_area("Raw Output", output, height=400)
                     st.error(f"Parse Error: {str(parse_error)}")
-            
+
             except Exception as e:
                 st.error(f"❌ An error occurred: {str(e)}")
                 st.info("Troubleshooting tips:")

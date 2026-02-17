@@ -16,11 +16,10 @@ def search_local_events(query: str) -> str:
     Args:
         query: Type of event or news (e.g., 'tech meetups', 'concerts', 'local news')
     Returns:
-        String with search results
+        String with search results including URLs
     """
     city = "Melbourne"
     
-    # Create targeted search queries for Melbourne
     search_queries = [
         f"{query} events in {city} Australia this week",
         f"{query} in {city} VIC upcoming events",
@@ -33,7 +32,10 @@ def search_local_events(query: str) -> str:
     for search_query in search_queries:
         try:
             search_results = ddgs.text(search_query, max_results=5)
-            formatted_results = "\n".join([f"- {r['title']}: {r['body']}" for r in search_results])
+            formatted_results = "\n".join([
+                f"- Title: {r['title']}\n  URL: {r['href']}\n  Description: {r['body']}"
+                for r in search_results
+            ])
             results.append(f"Search Query: {search_query}\n\nResults:\n{formatted_results}")
             time.sleep(1)
         except Exception as e:
@@ -50,7 +52,7 @@ def search_melbourne_news(topic: str) -> str:
     Args:
         topic: News topic (e.g., 'local news', 'weather', 'traffic', 'politics')
     Returns:
-        String with news results
+        String with news results including URLs
     """
     news_queries = [
         f"Melbourne Australia {topic} news today",
@@ -63,7 +65,10 @@ def search_melbourne_news(topic: str) -> str:
     for news_query in news_queries:
         try:
             search_results = ddgs.text(news_query, max_results=5)
-            formatted_results = "\n".join([f"- {r['title']}: {r['body']}" for r in search_results])
+            formatted_results = "\n".join([
+                f"- Title: {r['title']}\n  URL: {r['href']}\n  Description: {r['body']}"
+                for r in search_results
+            ])
             results.append(f"News Search: {news_query}\n\nResults:\n{formatted_results}")
             time.sleep(1)
         except Exception as e:
@@ -159,5 +164,4 @@ news_search_tool = search_melbourne_news
 save_tool = save_events
 budget_tool = analyze_event_budget
 
-# Export all tools
 __all__ = ['event_search_tool', 'news_search_tool', 'save_tool', 'budget_tool']
