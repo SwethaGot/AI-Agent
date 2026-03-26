@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from langchain_anthropic import ChatAnthropic
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from tools import event_search_tool, news_search_tool, save_tool, budget_tool
 
@@ -23,7 +23,7 @@ class MelbourneDiscoveryResponse(BaseModel):
 
 
 # STEP 2: INITIALIZE CLAUDE WITH TOOLS
-llm = ChatAnthropic(model="claude-sonnet-4-5-20250929")
+llm = ChatAnthropic(model="claude-sonnet-4-6")
 parser = PydanticOutputParser(pydantic_object=MelbourneDiscoveryResponse)
 
 # Bind tools to the LLM
@@ -33,46 +33,59 @@ llm_with_tools = llm.bind_tools(tools)
 
 # STEP 3: CREATE THE PROMPT
 system_prompt = """
-You are an intelligent Local Event and News Discovery Assistant for Melbourne, Australia.
+You are an intelligent Local Event and News Discovery Assistant for Melbourne, Australia 
+operating as a ReAct (Reasoning + Acting) agent.
+
+REACT PROCESS:
+You will go through multiple iterations of:
+1. THOUGHT: Analyze what information you have and what you still need
+2. ACTION: Choose which tools to call to get that information
+3. OBSERVATION: See the results and decide if you need more information
+
+AVAILABLE TOOLS:
+1. search_local_events - Search for events in Melbourne
+2. search_melbourne_news - Search for Melbourne news
+3. analyze_event_budget - Analyze budget-friendly options
+4. save_events - Save results to file
+
+DECISION MAKING:
+- If you have enough information to answer the query comprehensively, STOP calling tools
+- If you need more specific information, call relevant tools again with refined queries
+- You can call the same tool multiple times with different parameters
+- You can call tools in any order that makes sense
+
+WHEN TO STOP:
+Stop calling tools when you have:
+- Found relevant events or news
+- Analyzed budget options if requested
+- Gathered enough information to provide recommendations
+- Have source URLs for the user to verify
 
 Your mission:
-1. Search for events and news based on user interests (concerts, meetups, festivals, local news, etc.)
+1. Search for events and news based on user interests
 2. Identify budget-friendly and free options
 3. Organize events by date and relevance
 4. Provide news highlights relevant to Melbourne
 5. Suggest which friend groups to invite based on event type
-6. Save results in an easy-to-read format
-
-When suggesting friend groups, consider:
-- Tech meetups -> Tech-savvy friends, colleagues, aspiring developers
-- Concerts/Music -> Music lovers, party friends, concert buddies
-- Food festivals -> Foodies, family, casual friend groups
-- Art exhibitions -> Creative friends, art enthusiasts
-- Sports events (AFL, cricket, tennis) -> Sports fans, active friends
-- Networking events -> Professional contacts, entrepreneurs
-- Comedy shows -> Friends with similar humor, casual groups
-- Markets -> Shopping buddies, family, friends who love local goods
-
-For news queries:
-- Search for relevant Melbourne and Victoria news
-- Summarize key points
-- Include dates and sources when available
-
-Use the available tools to:
-1. Search for events using search_local_events
-2. Search for news using search_melbourne_news
-3. Analyze budget with analyze_event_budget
-4. Save results using save_events
 
 IMPORTANT FOR SOURCES:
-- Extract ALL URLs from the tool results
+- Extract ALL URLs from tool results
 - Include them in the sources field
-- Format each source as: [Title](URL)
-- Only include genuine URLs from search results
-- Never make up or guess URLs
+- Format as: [Title](URL)
+- Never make up URLs
 
-After gathering all information, provide a comprehensive response with event details, 
-news highlights, recommendations, friend group suggestions and genuine source links.
+Friend group suggestions:
+- Tech meetups -> Tech-savvy friends, colleagues
+- Concerts -> Music lovers, party friends
+- Food festivals -> Foodies, family
+- Art exhibitions -> Creative friends
+- Sports events -> Sports fans, active friends
+- Networking -> Professional contacts
+- Comedy shows -> Friends with similar humor
+- Markets -> Shopping buddies, family
+
+After you decide you have enough information, I will ask you to provide a final
+structured response.
 
 {format_instructions}
 """
@@ -86,69 +99,119 @@ prompt = prompt.partial(format_instructions=parser.get_format_instructions())
 
 
 # STEP 4: AGENT FUNCTION
-def run_agent(query: str):
+def run_agent(query: str, max_iterations: int = 10):
     """
-    Simple agent that calls tools and processes results
+    True ReAct agent with reasoning loop
     """
-    print("\nStep 1: Analyzing query and selecting tools...")
-
-    # First call to decide which tools to use
-    response = llm_with_tools.invoke([
+    print("\n" + "="*70)
+    print("REACT AGENT STARTING")
+    print("="*70)
+    
+    # Initialize conversation history
+    messages = [
         ("system", system_prompt.format(format_instructions=parser.get_format_instructions())),
         ("human", query)
-    ])
-
-    results = []
-
-    # Check if tools were called
-    if hasattr(response, 'tool_calls') and response.tool_calls:
-        print(f"\nStep 2: Executing {len(response.tool_calls)} tool(s)...")
-
-        for tool_call in response.tool_calls:
-            tool_name = tool_call.get('name', '')
-            tool_args = tool_call.get('args', {})
-
-            print(f"\n  - Calling tool: {tool_name}")
-
-            # Find and execute the tool
-            for tool in tools:
-                if tool.name == tool_name:
-                    try:
-                        result = tool.func(**tool_args)
-                        results.append(f"Tool: {tool_name}\nResult: {result}")
-                        print(f"    Status: Success")
-                    except Exception as e:
-                        error_msg = f"Error with {tool_name}: {str(e)}"
-                        results.append(error_msg)
-                        print(f"    Status: Failed - {str(e)}")
-                    break
-
-    # Combine all results
-    combined_results = "\n\n".join(results) if results else "No tools were executed."
-
-    print("\nStep 3: Generating final response...")
-
-    # Second call to generate final structured response
-    final_prompt = f"""
-Based on the following tool results, provide a comprehensive answer about 
-Melbourne events and news.
-
-Tool Results:
-{combined_results}
+    ]
+    
+    iteration = 0
+    
+    # REACT LOOP - Agent keeps going until it's done
+    while iteration < max_iterations:
+        iteration += 1
+        print(f"\n--- ITERATION {iteration} ---")
+        
+        # THOUGHT: Agent decides what to do
+        print("Agent is thinking...")
+        response = llm_with_tools.invoke(messages)
+        
+        # Check if agent is done (no more tool calls)
+        if not hasattr(response, 'tool_calls') or not response.tool_calls:
+            print("\nAgent decided it has enough information. Generating final response...")
+            
+            # Agent is done, generate final structured answer
+            final_prompt = f"""
+Based on all the information gathered, provide a comprehensive answer about Melbourne events and news.
 
 Original Query: {query}
 
-IMPORTANT: Extract all URLs from the tool results and include them in the 
-sources field formatted as [Title](URL). Only use URLs that appear in the 
-tool results, never make up URLs.
+Conversation History:
+{format_conversation(messages)}
+
+IMPORTANT: Extract all URLs from previous tool results and include them in the
+sources field formatted as [Title](URL).
+execute
+Please provide a detailed response in the following JSON format:
+{parser.get_format_instructions()}
+"""
+            
+            final_response = llm.invoke(final_prompt)
+            return final_response.content
+        
+        # ACTION: Execute the tools agent chose
+        print(f"\nAgent chose {len(response.tool_calls)} tool(s) to execute:")
+        
+        for tool_call in response.tool_calls:
+            tool_name = tool_call.get('name', '')
+            tool_args = tool_call.get('args', {})
+            
+            print(f"\n  Tool: {tool_name}")
+            print(f"  Args: {tool_args}")
+            
+            # Find and execute the tool
+            tool_result = None
+            for tool in tools:
+                if tool.name == tool_name:
+                    try:
+                        tool_result = tool.func(**tool_args)
+                        print(f"  Status: Success")
+                        print(f"  Result preview: {tool_result[:200]}...")
+                    except Exception as e:
+                        tool_result = f"Error: {str(e)}"
+                        print(f"  Status: Failed - {str(e)}")
+                    break
+            
+            if tool_result is None:
+                tool_result = f"Tool {tool_name} not found"
+            
+            # OBSERVATION: Add tool result back to conversation
+            # Agent will see this in next iteration
+            messages.append(("assistant", response))
+            messages.append(("tool", f"Tool: {tool_name}\nResult: {tool_result}"))
+        
+        print(f"\nAgent will now process these results and decide next step...")
+    
+    # Max iterations reached
+    print(f"\n⚠️ Max iterations ({max_iterations}) reached. Generating response with available data...")
+    
+    final_prompt = f"""
+Based on the information gathered so far, provide the best possible answer.
+
+Original Query: {query}
+
+Conversation History:
+{format_conversation(messages)}
 
 Please provide a detailed response in the following JSON format:
 {parser.get_format_instructions()}
 """
-
+    
     final_response = llm.invoke(final_prompt)
-
     return final_response.content
+
+
+def format_conversation(messages):
+    """Helper to format conversation history for final prompt"""
+    formatted = []
+    for role, content in messages:
+        if role == "system":
+            continue  # Skip system message
+        elif role == "human":
+            formatted.append(f"User: {content}")
+        elif role == "assistant":
+            formatted.append(f"Assistant: Chose tools to execute")
+        elif role == "tool":
+            formatted.append(f"Tool Result: {content[:500]}...")  # Truncate long results
+    return "\n".join(formatted)
 
 
 # STEP 5: RUN THE AGENT

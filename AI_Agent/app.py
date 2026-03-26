@@ -1,10 +1,13 @@
+import re
+import json
 import streamlit as st
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from langchain_anthropic import ChatAnthropic
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from tools import event_search_tool, news_search_tool, save_tool, budget_tool
+from datetime import datetime
 
 load_dotenv()
 
@@ -23,54 +26,60 @@ class MelbourneDiscoveryResponse(BaseModel):
     tools_used: list[str]
 
 
+# Initialize session state for conversation
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+
+if 'user_context' not in st.session_state:
+    st.session_state.user_context = {
+        'preferences': {},
+        'search_history': [],
+        'current_results': None
+    }
+
+if 'agent_memory' not in st.session_state:
+    st.session_state.agent_memory = []
+
+
 # Initialize Claude
 @st.cache_resource
 def init_llm():
-    llm = ChatAnthropic(model="claude-sonnet-4-5-20250929")
+    llm = ChatAnthropic(model="claude-sonnet-4-6")
     parser = PydanticOutputParser(pydantic_object=MelbourneDiscoveryResponse)
 
     system_prompt = """
-    You are an intelligent Local Event and News Discovery Assistant for Melbourne, Australia.
-
-    Your mission:
-    1. Search for events and news based on user interests (concerts, meetups, festivals, local news, etc.)
-    2. Identify budget-friendly and free options
-    3. Organize events by date and relevance
-    4. Provide news highlights relevant to Melbourne
-    5. Suggest which friend groups to invite based on event type
-    6. Save results in an easy-to-read format
-
-    When suggesting friend groups, consider:
-    - Tech meetups -> Tech-savvy friends, colleagues, aspiring developers
-    - Concerts/Music -> Music lovers, party friends, concert buddies
-    - Food festivals -> Foodies, family, casual friend groups
-    - Art exhibitions -> Creative friends, art enthusiasts
-    - Sports events (AFL, cricket, tennis) -> Sports fans, active friends
-    - Networking events -> Professional contacts, entrepreneurs
-    - Comedy shows -> Friends with similar humor, casual groups
-    - Markets -> Shopping buddies, family, friends who love local goods
-
-    For news queries:
-    - Search for relevant Melbourne and Victoria news
-    - Summarize key points
-    - Include dates and sources when available
-
-    Use the available tools to:
-    1. Search for events using search_local_events
-    2. Search for news using search_melbourne_news
-    3. Analyze budget with analyze_event_budget
-    4. Save results using save_events
-
-    IMPORTANT FOR SOURCES:
-    - Extract ALL URLs from the tool results
-    - Include them in the sources field
-    - Format each source as: [Title](URL)
-    - Only include genuine URLs from search results
-    - Never make up or guess URLs
-
-    After gathering all information, provide a comprehensive response with event details,
-    news highlights, recommendations, friend group suggestions and genuine source links.
-
+    You are a conversational Local Event Intelligence Assistant for Melbourne, Australia.
+    
+    You are having a MULTI-TURN conversation with the user. This means:
+    - You can ask clarifying questions
+    - You remember what was said previously
+    - You can refine searches based on user feedback
+    - You help users iteratively find what they want
+    
+    CONVERSATION FLOW:
+    1. If user query is vague, ask clarifying questions
+    2. If you search and user wants refinement, search again with better parameters
+    3. Build understanding of user preferences over time
+    4. Suggest related events based on what they liked before
+    
+    AVAILABLE TOOLS:
+    1. search_local_events - Search for events in Melbourne
+    2. search_melbourne_news - Search for Melbourne news
+    3. analyze_event_budget - Analyze budget-friendly options
+    4. save_events - Save results to file
+    
+    WHEN TO ASK QUESTIONS vs SEARCH:
+    - Vague query like "find events" → Ask what type of events
+    - "tech meetups" → Search directly
+    - After showing results, ask "Would you like to refine this?"
+    - If user says "too expensive" → Search with lower budget
+    - If user says "not interested" → Ask what they prefer instead
+    
+    IMPORTANT:
+    - Extract URLs from search results
+    - Format sources as [Title](URL)
+    - Remember user preferences for future suggestions
+    
     {format_instructions}
     """
 
@@ -83,311 +92,498 @@ def init_llm():
 llm, llm_with_tools, parser, system_prompt, tools = init_llm()
 
 
-# Agent function
-def run_agent(query: str):
-    """Simple agent that calls tools and processes results"""
+def run_conversational_agent(user_input: str):
+    """
+    Run agent with full conversation context
+    """
+    # Build conversation context
+    conversation_context = build_conversation_context()
+    
+    # Add user input to memory
+    st.session_state.agent_memory.append({
+        "role": "user",
+        "content": user_input
+    })
+    
+    # Agent decides: clarify, search, or respond from context
+    agent_decision = make_agent_decision(user_input, conversation_context)
+    
+    if agent_decision['action'] == 'clarify':
+        # Agent asks a question
+        response = agent_decision['question']
+        st.session_state.agent_memory.append({
+            "role": "assistant",
+            "content": response
+        })
+        return {'type': 'text', 'content': response}
+    
+    elif agent_decision['action'] == 'search':
+        # Agent performs search
+        search_params = agent_decision['params']
+        results = execute_search_with_context(search_params)
+        
+        # Store results
+        st.session_state.user_context['current_results'] = results
+        st.session_state.user_context['search_history'].append({
+            'query': user_input,
+            'params': search_params,
+            'timestamp': datetime.now().isoformat()
+        })
+        
+        # Agent formulates response
+        response_text = format_search_results(results)
+        st.session_state.agent_memory.append({
+            "role": "assistant",
+            "content": response_text
+        })
+        
+        return {'type': 'results', 'content': results, 'text': response_text}
+    
+    elif agent_decision['action'] == 'refine':
+        # Agent refines previous search
+        refined_params = refine_search_params(agent_decision['refinement'])
+        results = execute_search_with_context(refined_params)
+        
+        st.session_state.user_context['current_results'] = results
+        response_text = format_search_results(results)
+        
+        st.session_state.agent_memory.append({
+            "role": "assistant",
+            "content": response_text
+        })
+        
+        return {'type': 'results', 'content': results, 'text': response_text}
+    
+    else:
+        # Agent responds from context
+        response = agent_decision['response']
+        st.session_state.agent_memory.append({
+            "role": "assistant",
+            "content": response
+        })
+        return {'type': 'text', 'content': response}
 
-    # First call to decide which tools to use
-    response = llm_with_tools.invoke([
-        ("system", system_prompt.format(format_instructions=parser.get_format_instructions())),
-        ("human", query)
-    ])
 
-    results = []
+def truncate_at_line(text: str, limit: int) -> str:
+    """Truncate text at a line boundary to avoid cutting URLs mid-string."""
+    if len(text) <= limit:
+        return text
+    truncated = text[:limit]
+    last_newline = truncated.rfind('\n')
+    return truncated[:last_newline] if last_newline != -1 else truncated
 
-    # Check if tools were called
-    if hasattr(response, 'tool_calls') and response.tool_calls:
+
+def build_conversation_context():
+    """Build context from conversation history"""
+    context = {
+        'conversation_history': st.session_state.agent_memory[-10:],  # Last 10 exchanges
+        'user_preferences': st.session_state.user_context['preferences'],
+        'previous_searches': st.session_state.user_context['search_history'][-3:],  # Last 3 searches
+        'current_results': st.session_state.user_context['current_results']
+    }
+    return context
+
+
+def make_agent_decision(user_input: str, context: dict):
+    """
+    Agent decides what to do based on input and context
+    """
+    decision_prompt = f"""
+You are deciding what action to take based on user input.
+
+User input: "{user_input}"
+
+Previous conversation: {len(context['conversation_history'])} messages
+Has current results: {context['current_results'] is not None}
+
+RULES:
+1. If user mentions specific event type (tech, food, music, sports, comedy, etc.) → SEARCH
+2. If user mentions timeframe (this week, weekend, today, tomorrow) → SEARCH  
+3. If user mentions budget (free, cheap, under $X) → SEARCH
+4. If user says very vague things like just "events" or "find me something" → CLARIFY
+5. If user is refining previous results (cheaper, different, not those) → REFINE
+6. If user asks about current results → RESPOND
+
+Based on the input "{user_input}", what should I do?
+
+Respond with ONLY ONE of these exact formats:
+
+For CLARIFY:
+CLARIFY: What type of events are you interested in? (tech, food, sports, music, art, etc.)
+
+For SEARCH:
+SEARCH: {{"event_type": "tech", "budget": 100, "timeframe": "this week"}}
+
+For REFINE:
+REFINE: {{"aspect": "budget", "value": "50"}}
+
+For RESPOND:
+RESPOND: [your response here]
+
+Your response:"""
+    
+    response = llm.invoke(decision_prompt)
+    content = response.content.strip()
+    
+    # Parse the response
+    if content.startswith("CLARIFY:"):
+        question = content.replace("CLARIFY:", "").strip()
+        return {
+            'action': 'clarify',
+            'question': question
+        }
+    
+    elif content.startswith("SEARCH:"):
+        try:
+            params_str = content.replace("SEARCH:", "").strip()
+            params = json.loads(params_str)
+            return {
+                'action': 'search',
+                'params': params
+            }
+        except (json.JSONDecodeError, ValueError, KeyError):
+            # Fallback: extract keywords
+            return {
+                'action': 'search',
+                'params': extract_search_params_from_text(user_input)
+            }
+
+    elif content.startswith("REFINE:"):
+        try:
+            refinement_str = content.replace("REFINE:", "").strip()
+            refinement = json.loads(refinement_str)
+            return {
+                'action': 'refine',
+                'refinement': refinement
+            }
+        except (json.JSONDecodeError, ValueError, KeyError):
+            return {
+                'action': 'clarify',
+                'question': "Could you clarify what you'd like to change about the search?"
+            }
+    
+    elif content.startswith("RESPOND:"):
+        response_text = content.replace("RESPOND:", "").strip()
+        return {
+            'action': 'respond',
+            'response': response_text
+        }
+    
+    else:
+        # Default fallback
+        return {
+            'action': 'search',
+            'params': extract_search_params_from_text(user_input)
+        }
+
+
+def extract_search_params_from_text(text: str):
+    """
+    Simple keyword extraction for search parameters
+    """
+    text_lower = text.lower()
+    
+    params = {
+        'event_type': 'events',
+        'budget': 100,
+        'timeframe': 'this week'
+    }
+    
+    # Extract event type
+    event_keywords = {
+        'tech': ['tech', 'technology', 'coding', 'programming', 'developer', 'startup'],
+        'food': ['food', 'restaurant', 'dining', 'culinary', 'cooking'],
+        'music': ['music', 'concert', 'band', 'DJ', 'festival'],
+        'sports': ['sport', 'fitness', 'AFL', 'cricket', 'running', 'gym'],
+        'art': ['art', 'gallery', 'exhibition', 'museum', 'culture'],
+        'comedy': ['comedy', 'standup', 'funny', 'comedian'],
+        'networking': ['networking', 'professional', 'business', 'meetup']
+    }
+    
+    for event_type, keywords in event_keywords.items():
+        if any(keyword in text_lower for keyword in keywords):
+            params['event_type'] = event_type
+            break
+    
+    # Extract budget
+    if 'free' in text_lower:
+        params['budget'] = 0
+    elif 'cheap' in text_lower or 'budget' in text_lower:
+        params['budget'] = 30
+    elif '$' in text:
+        match = re.search(r'\$(\d+)', text)
+        if match:
+            params['budget'] = int(match.group(1))
+    
+    # Extract timeframe
+    if 'today' in text_lower:
+        params['timeframe'] = 'today'
+    elif 'tomorrow' in text_lower:
+        params['timeframe'] = 'tomorrow'
+    elif 'weekend' in text_lower or 'saturday' in text_lower or 'sunday' in text_lower:
+        params['timeframe'] = 'this weekend'
+    elif 'week' in text_lower:
+        params['timeframe'] = 'this week'
+    elif 'month' in text_lower:
+        params['timeframe'] = 'this month'
+    
+    return params
+
+
+def execute_search_with_context(params: dict):
+    """
+    Execute search with ReAct loop
+    """
+    # Build search query from params
+    query_parts = []
+    if params.get('event_type'):
+        query_parts.append(params['event_type'])
+    if params.get('timeframe'):
+        query_parts.append(params['timeframe'])
+    
+    search_query = f"Find {' '.join(query_parts)} events in Melbourne"
+    if params.get('budget') is not None:
+        search_query += f" with budget under ${params['budget']}"
+    
+    # Build messages for ReAct agent
+    messages = [
+        SystemMessage(content=system_prompt.format(format_instructions=parser.get_format_instructions())),
+        HumanMessage(content=search_query)
+    ]
+
+    # ReAct loop
+    iteration = 0
+    max_iterations = 5
+    all_tool_results = []
+
+    while iteration < max_iterations:
+        iteration += 1
+
+        response = llm_with_tools.invoke(messages)
+
+        # Check if done
+        if not response.tool_calls:
+            break
+
+        # Add assistant message with tool calls
+        messages.append(response)
+
+        # Execute tools
         for tool_call in response.tool_calls:
             tool_name = tool_call.get('name', '')
             tool_args = tool_call.get('args', {})
+            tool_call_id = tool_call.get('id', '')
 
-            # Find and execute the tool
+            tool_result = f"Tool {tool_name} not found"
             for tool in tools:
                 if tool.name == tool_name:
                     try:
-                        result = tool.func(**tool_args)
-                        results.append(f"Tool: {tool_name}\nResult: {result}")
+                        tool_result = tool.func(**tool_args)
+                        all_tool_results.append(tool_result)
                     except Exception as e:
-                        error_msg = f"Error with {tool_name}: {str(e)}"
-                        results.append(error_msg)
+                        tool_result = f"Error: {str(e)}"
                     break
 
-    # Combine all results
-    combined_results = "\n\n".join(results) if results else "No tools were executed."
+            messages.append(ToolMessage(content=truncate_at_line(tool_result, 2000), tool_call_id=tool_call_id))
+    
+    # Generate final structured response
+    if all_tool_results:
+        final_prompt = f"""
+Based on these search results, provide a structured response.
 
-    # Second call to generate final structured response
-    final_prompt = f"""
-Based on the following tool results, provide a comprehensive answer about 
-Melbourne events and news.
+Search query: {search_query}
+Tool results summary: {len(all_tool_results)} tools executed
 
-Tool Results:
-{combined_results}
+Results:
+{truncate_at_line(all_tool_results[0], 3000) if all_tool_results else "No results"}
 
-Original Query: {query}
-
-IMPORTANT: Extract all URLs from the tool results and include them in the
-sources field formatted as [Title](URL). Only use URLs that appear in the
-tool results, never make up URLs.
-
-Please provide a detailed response in the following JSON format:
+Provide response in this JSON format:
 {parser.get_format_instructions()}
 """
+        
+        try:
+            final_response = llm.invoke(final_prompt)
+            parsed = parser.parse(final_response.content)
+            return parsed
+        except Exception as e:
+            st.error(f"Error parsing response: {str(e)}")
+            # Return minimal structure
+            return MelbourneDiscoveryResponse(
+                query=search_query,
+                city="Melbourne",
+                events_found=["Search completed but parsing failed. Raw results available in logs."],
+                news_highlights=[],
+                recommendations=["Try refining your search"],
+                budget_friendly_options=[],
+                friend_group_suggestions=[],
+                sources=[],
+                tools_used=["search_local_events"]
+            )
+    
+    # No results
+    return MelbourneDiscoveryResponse(
+        query=search_query,
+        city="Melbourne",
+        events_found=["No events found matching your criteria"],
+        news_highlights=[],
+        recommendations=["Try broadening your search criteria", "Try different event types", "Check different timeframes"],
+        budget_friendly_options=[],
+        friend_group_suggestions=[],
+        sources=[],
+        tools_used=[]
+    )
 
-    final_response = llm.invoke(final_prompt)
+def refine_search_params(refinement: dict):
+    """
+    Refine previous search based on user feedback
+    """
+    # Get last search
+    if st.session_state.user_context['search_history']:
+        last_search = st.session_state.user_context['search_history'][-1]
+        params = last_search['params'].copy()
+        
+        # Apply refinement
+        if refinement['aspect'] == 'budget':
+            params['budget'] = int(refinement['value'])
+        elif refinement['aspect'] == 'time':
+            params['timeframe'] = refinement['value']
+        elif refinement['aspect'] == 'type':
+            params['event_type'] = refinement['value']
+        
+        return params
+    
+    return {}
 
-    return final_response.content
+
+def format_search_results(results):
+    """Format results as conversational text"""
+    if not results:
+        return "I couldn't find any events matching those criteria. Would you like to try different parameters?"
+    
+    text = f"I found {len(results.events_found)} events for you!\n\n"
+    
+    for i, event in enumerate(results.events_found[:5], 1):
+        text += f"{i}. {event}\n"
+    
+    text += f"\nWould you like me to:\n"
+    text += f"- Refine the search?\n"
+    text += f"- See budget options?\n"
+    text += f"- Get more details about any event?"
+    
+    return text
 
 
 # Page configuration
 st.set_page_config(
-    page_title="Melbourne Event Finder",
+    page_title="Melbourne Event Intelligence",
     page_icon="🎭",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
-
-# Custom CSS
-st.markdown("""
-    <style>
-    .main-header {
-        font-size: 3rem;
-        font-weight: bold;
-        color: #1E3A8A;
-        text-align: center;
-        margin-bottom: 0.5rem;
-    }
-    .sub-header {
-        font-size: 1.2rem;
-        color: #64748B;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .stButton>button {
-        width: 100%;
-        background-color: #2563EB;
-        color: white;
-        font-size: 1.1rem;
-        padding: 0.75rem;
-        border-radius: 0.5rem;
-    }
-    .stButton>button:hover {
-        background-color: #1E40AF;
-    }
-    .source-link {
-        padding: 0.5rem;
-        border-radius: 0.3rem;
-        margin: 0.3rem 0;
-    }
-    </style>
-""", unsafe_allow_html=True)
 
 # Header
-st.markdown('<p class="main-header">🎭 Melbourne Event Discovery Agent</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Find local events and news in Melbourne, Australia powered by AI</p>', unsafe_allow_html=True)
+st.title("🎭 Melbourne Event Intelligence Assistant")
+st.caption("Your conversational AI guide to Melbourne events")
 
-# Sidebar
+# Sidebar - Conversation history & context
 with st.sidebar:
-    st.header("ℹ️ About")
-    st.write("""
-    This AI-powered agent helps you discover:
-    - 🎪 Local events and activities
-    - 📰 Melbourne news updates
-    - 💰 Budget-friendly options
-    - 👥 Friend group suggestions
-    - 🔗 Genuine links to sources
-    """)
+    st.header("📊 Conversation Context")
+    
+    if st.session_state.user_context['preferences']:
+        st.subheader("Your Preferences")
+        st.json(st.session_state.user_context['preferences'])
+    
+    if st.session_state.user_context['search_history']:
+        st.subheader("Recent Searches")
+        for search in st.session_state.user_context['search_history'][-3:]:
+            st.caption(f"🔍 {search['query']}")
+    
+    if st.button("🔄 Start New Conversation"):
+        st.session_state.messages = []
+        st.session_state.user_context = {
+            'preferences': {},
+            'search_history': [],
+            'current_results': None
+        }
+        st.session_state.agent_memory = []
+        st.rerun()
 
-    st.divider()
-
-    st.header("🔧 How It Works")
-    st.write("""
-    1. Choose what to search for
-    2. Enter your preferences
-    3. Set your budget
-    4. Click Search
-    5. Get AI-powered recommendations!
-    """)
-
-    st.divider()
-
-    st.header("💡 Tips")
-    st.write("""
-    - Be specific with event types
-    - Try budget $0 for free events
-    - Check 'Both' for complete info
-    - Click source links to verify details
-    """)
-
-    st.divider()
-
-    st.caption("Powered by Claude AI & LangChain")
-
-# Main content
+# Main chat interface
 st.divider()
 
-# Search type selection
-st.subheader("What would you like to search for?")
-search_type = st.radio(
-    "Select search type:",
-    ["Events", "News", "Both"],
-    horizontal=True,
-    label_visibility="collapsed"
-)
-
-st.divider()
-
-# Input fields based on search type
-col1, col2 = st.columns(2)
-
-with col1:
-    if search_type in ["Events", "Both"]:
-        event_type = st.text_input(
-            "🎭 Event Type",
-            placeholder="e.g., tech meetups, concerts, food festivals, AFL games, comedy shows...",
-            help="What type of events are you interested in?"
-        )
-    else:
-        event_type = ""
-
-with col2:
-    if search_type in ["News", "Both"]:
-        news_topic = st.text_input(
-            "📰 News Topic",
-            placeholder="e.g., local news, weather, traffic, politics...",
-            help="What news topics interest you?"
-        )
-    else:
-        news_topic = ""
-
-# Budget slider
-if search_type in ["Events", "Both"]:
-    st.subheader("💰 Budget")
-    budget = st.slider(
-        "Maximum budget in AUD",
-        min_value=0,
-        max_value=500,
-        value=50,
-        step=10,
-        help="Set to $0 for free events only"
-    )
-else:
-    budget = 0
-
-st.divider()
-
-# Search button
-if st.button("🔍 Search", type="primary", use_container_width=True):
-
-    # Validate inputs
-    if search_type == "Events" and not event_type:
-        st.error("Please enter an event type!")
-    elif search_type == "News" and not news_topic:
-        st.error("Please enter a news topic!")
-    elif search_type == "Both" and (not event_type or not news_topic):
-        st.error("Please enter both event type and news topic!")
-    else:
-        # Build query
-        if search_type == "Events":
-            query = f"Find {event_type} events in Melbourne Australia with budget under ${budget} AUD"
-        elif search_type == "News":
-            query = f"Find latest news about {news_topic} in Melbourne Australia"
+# Display conversation history
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        if message["role"] == "assistant" and 'results' in message:
+            # Show structured results
+            results = message['results']
+            
+            tab1, tab2, tab3 = st.tabs(["Events", "Recommendations", "Sources"])
+            
+            with tab1:
+                for i, event in enumerate(results.events_found, 1):
+                    st.write(f"{i}. {event}")
+            
+            with tab2:
+                for rec in results.recommendations:
+                    st.write(f"• {rec}")
+            
+            with tab3:
+                for source in results.sources:
+                    st.markdown(source)
         else:
-            query = f"Find {event_type} events in Melbourne Australia with budget under ${budget} AUD and also provide latest {news_topic} news in Melbourne"
+            st.write(message["content"])
 
-        # Show query
-        with st.expander("📝 Search Query"):
-            st.code(query)
-
-        # Run agent with loading spinner
-        with st.spinner("🤖 AI Agent is searching... This may take 10-20 seconds"):
-            try:
-                output = run_agent(query)
-
-                # Parse response
-                try:
-                    structured_response = parser.parse(output)
-
-                    # Success message
-                    st.success("✅ Search complete!")
-
-                    st.divider()
-
-                    # Display results in tabs
-                    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-                        "📅 Events",
-                        "📰 News",
-                        "⭐ Recommendations",
-                        "💵 Budget Options",
-                        "👥 Friend Suggestions",
-                        "🔗 Sources"
-                    ])
-
-                    with tab1:
-                        st.subheader(f"Events Found ({len(structured_response.events_found)})")
-                        if structured_response.events_found:
-                            for i, event in enumerate(structured_response.events_found, 1):
-                                st.write(f"{i}. {event}")
-                        else:
-                            st.info("No specific events found. Check recommendations!")
-
-                    with tab2:
-                        st.subheader(f"News Highlights ({len(structured_response.news_highlights)})")
-                        if structured_response.news_highlights:
-                            for i, news in enumerate(structured_response.news_highlights, 1):
-                                st.write(f"{i}. {news}")
-                        else:
-                            st.info("No news highlights available.")
-
-                    with tab3:
-                        st.subheader("Top Recommendations")
-                        for i, rec in enumerate(structured_response.recommendations, 1):
-                            st.write(f"{i}. {rec}")
-
-                    with tab4:
-                        st.subheader("Budget-Friendly Options")
-                        if structured_response.budget_friendly_options:
-                            for i, option in enumerate(structured_response.budget_friendly_options, 1):
-                                st.write(f"{i}. {option}")
-                        else:
-                            st.info("No specific budget options found.")
-
-                    with tab5:
-                        st.subheader("Friend Group Suggestions")
-                        for i, suggestion in enumerate(structured_response.friend_group_suggestions, 1):
-                            st.write(f"{i}. {suggestion}")
-
-                    with tab6:
-                        st.subheader("Sources & Links")
-                        st.caption("Click any link to visit the original source")
-                        if structured_response.sources:
-                            for i, source in enumerate(structured_response.sources, 1):
-                                # Render as clickable markdown link
-                                st.markdown(f"{i}. {source}")
-                        else:
-                            st.info("No sources available for this search.")
-
-                    # Footer info
-                    st.divider()
-                    st.caption(f"🔧 Tools used: {', '.join(structured_response.tools_used)}")
-                    st.caption(f"📍 City: {structured_response.city}")
-
-                except Exception as parse_error:
-                    st.warning("⚠️ Could not parse structured response. Showing raw output:")
-                    st.text_area("Raw Output", output, height=400)
-                    st.error(f"Parse Error: {str(parse_error)}")
-
-            except Exception as e:
-                st.error(f"❌ An error occurred: {str(e)}")
-                st.info("Troubleshooting tips:")
-                st.write("- Check your internet connection")
-                st.write("- Verify API keys in .env file")
-                st.write("- Try a simpler search query")
+# Chat input
+if prompt := st.chat_input("Ask me about Melbourne events..."):
+    # Add user message
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    
+    with st.chat_message("user"):
+        st.write(prompt)
+    
+    # Agent processes
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            response = run_conversational_agent(prompt)
+        
+        if response['type'] == 'results':
+            # Show results
+            results = response['content']
+            st.write(response['text'])
+            
+            tab1, tab2, tab3 = st.tabs(["Events", "Recommendations", "Sources"])
+            
+            with tab1:
+                if results.events_found:
+                    for i, event in enumerate(results.events_found, 1):
+                        st.write(f"{i}. {event}")
+            
+            with tab2:
+                for rec in results.recommendations:
+                    st.write(f"• {rec}")
+            
+            with tab3:
+                if results.sources:
+                    for source in results.sources:
+                        st.markdown(source)
+            
+            # Add to messages with results
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response['text'],
+                "results": results
+            })
+        
+        else:
+            # Simple text response
+            st.write(response['content'])
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response['content']
+            })
+    
+    st.rerun()
 
 # Footer
 st.divider()
-st.markdown("""
-    <div style='text-align: center; color: #64748B; padding: 2rem;'>
-        <p><strong>⚠️ Important:</strong> Always verify event details on official websites before attending.</p>
-        <p>Recommended sources: TimeOut Melbourne, Eventbrite, What's On Melbourne</p>
-    </div>
-""", unsafe_allow_html=True)
+st.caption("💡 Tip: You can refine searches by saying things like 'cheaper', 'this weekend', or 'something different'")
