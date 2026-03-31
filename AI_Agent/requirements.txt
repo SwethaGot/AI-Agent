@@ -1,10 +1,11 @@
-langchain 
-wikipedia 
-langchain-community 
+langchain
+wikipedia
+langchain-community
 langchain-openai
 langchain-anthropic
 python-dotenv
 pydantic
-google-search-results
 streamlit
 ddgs==9.10.0
+chromadb
+sentence-transformers

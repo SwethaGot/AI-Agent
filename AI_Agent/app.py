@@ -1,5 +1,6 @@
 import re
 import json
+import time
 import streamlit as st
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -7,7 +8,9 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from tools import event_search_tool, news_search_tool, save_tool, budget_tool
+from rag import RAGManager
 from datetime import datetime
+from anthropic._exceptions import OverloadedError
 
 load_dotenv()
 
@@ -39,6 +42,19 @@ if 'user_context' not in st.session_state:
 
 if 'agent_memory' not in st.session_state:
     st.session_state.agent_memory = []
+
+
+def invoke_with_retry(llm_callable, messages, max_retries=3):
+    """Retry an LLM call on OverloadedError with exponential backoff."""
+    for attempt in range(max_retries):
+        try:
+            return llm_callable(messages)
+        except OverloadedError:
+            if attempt == max_retries - 1:
+                raise
+            wait = 2 ** attempt  # 1s, 2s, 4s
+            st.toast(f"API busy, retrying in {wait}s...", icon="⏳")
+            time.sleep(wait)
 
 
 # Initialize Claude
@@ -89,7 +105,14 @@ def init_llm():
     return llm, llm_with_tools, parser, system_prompt, tools
 
 
+@st.cache_resource
+def init_rag():
+    # Downloads ~80MB HuggingFace model on first run, cached after that
+    return RAGManager()
+
+
 llm, llm_with_tools, parser, system_prompt, tools = init_llm()
+rag = init_rag()
 
 
 def run_conversational_agent(user_input: str):
@@ -118,25 +141,42 @@ def run_conversational_agent(user_input: str):
         return {'type': 'text', 'content': response}
     
     elif agent_decision['action'] == 'search':
-        # Agent performs search
         search_params = agent_decision['params']
-        results = execute_search_with_context(search_params)
-        
-        # Store results
+        event_type = search_params.get('event_type', 'events')
+
+        # 1. Check RAG cache first
+        cached = rag.retrieve_cached_search(user_input, search_params)
+        if cached:
+            results = _parse_cached_result(cached, user_input)
+            source_label = "memory"
+        else:
+            # 2. Live search
+            results = execute_search_with_context(search_params)
+            source_label = "live"
+            # 3. Cache the result for next time
+            if results and results.events_found:
+                rag.store_search_result(user_input, format_search_results(results), search_params)
+
+        # 4. Always update user preferences
+        rag.store_user_preference(event_type)
+
         st.session_state.user_context['current_results'] = results
         st.session_state.user_context['search_history'].append({
             'query': user_input,
             'params': search_params,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now().isoformat(),
+            'source': source_label
         })
-        
-        # Agent formulates response
+
         response_text = format_search_results(results)
+        if source_label == "memory":
+            response_text = "*(From recent search cache)*\n\n" + response_text
+
         st.session_state.agent_memory.append({
             "role": "assistant",
             "content": response_text
         })
-        
+
         return {'type': 'results', 'content': results, 'text': response_text}
     
     elif agent_decision['action'] == 'refine':
@@ -222,7 +262,7 @@ RESPOND: [your response here]
 
 Your response:"""
     
-    response = llm.invoke(decision_prompt)
+    response = invoke_with_retry(llm.invoke, decision_prompt)
     content = response.content.strip()
     
     # Parse the response
@@ -359,7 +399,7 @@ def execute_search_with_context(params: dict):
     while iteration < max_iterations:
         iteration += 1
 
-        response = llm_with_tools.invoke(messages)
+        response = invoke_with_retry(llm_with_tools.invoke, messages)
 
         # Check if done
         if not response.tool_calls:
@@ -402,7 +442,7 @@ Provide response in this JSON format:
 """
         
         try:
-            final_response = llm.invoke(final_prompt)
+            final_response = invoke_with_retry(llm.invoke, final_prompt)
             parsed = parser.parse(final_response.content)
             return parsed
         except Exception as e:
@@ -455,6 +495,22 @@ def refine_search_params(refinement: dict):
     return {}
 
 
+def _parse_cached_result(cached_text: str, original_query: str) -> MelbourneDiscoveryResponse:
+    """Wrap cached text back into a MelbourneDiscoveryResponse."""
+    lines = [l.strip() for l in cached_text.splitlines() if l.strip()]
+    return MelbourneDiscoveryResponse(
+        query=original_query,
+        city="Melbourne",
+        events_found=lines[:10],
+        news_highlights=[],
+        recommendations=["Results from cache — search again for the latest updates"],
+        budget_friendly_options=[],
+        friend_group_suggestions=[],
+        sources=[],
+        tools_used=["cache"]
+    )
+
+
 def format_search_results(results):
     """Format results as conversational text"""
     if not results:
@@ -488,14 +544,17 @@ st.caption("Your conversational AI guide to Melbourne events")
 with st.sidebar:
     st.header("📊 Conversation Context")
     
-    if st.session_state.user_context['preferences']:
-        st.subheader("Your Preferences")
-        st.json(st.session_state.user_context['preferences'])
-    
+    top_prefs = rag.get_top_preferences()
+    if top_prefs:
+        st.subheader("Your Top Interests")
+        for pref in top_prefs:
+            st.caption(f"⭐ {pref}")
+
     if st.session_state.user_context['search_history']:
         st.subheader("Recent Searches")
         for search in st.session_state.user_context['search_history'][-3:]:
-            st.caption(f"🔍 {search['query']}")
+            source_icon = "💾" if search.get('source') == 'memory' else "🔍"
+            st.caption(f"{source_icon} {search['query']}")
     
     if st.button("🔄 Start New Conversation"):
         st.session_state.messages = []

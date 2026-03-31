@@ -18,6 +18,9 @@ ENV/
 # Output files
 melbourne_events_*.txt
 
+# ChromaDB local vector store
+chroma_db/
+
 # OS
 .DS_Store
 Thumbs.db

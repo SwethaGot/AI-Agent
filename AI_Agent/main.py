@@ -90,14 +90,6 @@ structured response.
 {format_instructions}
 """
 
-prompt = ChatPromptTemplate.from_messages([
-    ("system", system_prompt),
-    ("human", "{query}"),
-])
-
-prompt = prompt.partial(format_instructions=parser.get_format_instructions())
-
-
 # STEP 4: AGENT FUNCTION
 def run_agent(query: str, max_iterations: int = 10):
     """
@@ -106,29 +98,28 @@ def run_agent(query: str, max_iterations: int = 10):
     print("\n" + "="*70)
     print("REACT AGENT STARTING")
     print("="*70)
-    
+
     # Initialize conversation history
     messages = [
-        ("system", system_prompt.format(format_instructions=parser.get_format_instructions())),
-        ("human", query)
+        SystemMessage(content=system_prompt.format(format_instructions=parser.get_format_instructions())),
+        HumanMessage(content=query)
     ]
-    
+
     iteration = 0
-    
+
     # REACT LOOP - Agent keeps going until it's done
     while iteration < max_iterations:
         iteration += 1
         print(f"\n--- ITERATION {iteration} ---")
-        
+
         # THOUGHT: Agent decides what to do
         print("Agent is thinking...")
         response = llm_with_tools.invoke(messages)
-        
+
         # Check if agent is done (no more tool calls)
-        if not hasattr(response, 'tool_calls') or not response.tool_calls:
+        if not response.tool_calls:
             print("\nAgent decided it has enough information. Generating final response...")
-            
-            # Agent is done, generate final structured answer
+
             final_prompt = f"""
 Based on all the information gathered, provide a comprehensive answer about Melbourne events and news.
 
@@ -139,26 +130,30 @@ Conversation History:
 
 IMPORTANT: Extract all URLs from previous tool results and include them in the
 sources field formatted as [Title](URL).
-execute
+
 Please provide a detailed response in the following JSON format:
 {parser.get_format_instructions()}
 """
-            
+
             final_response = llm.invoke(final_prompt)
             return final_response.content
-        
+
         # ACTION: Execute the tools agent chose
         print(f"\nAgent chose {len(response.tool_calls)} tool(s) to execute:")
-        
+
+        # Add assistant message with tool calls
+        messages.append(response)
+
         for tool_call in response.tool_calls:
             tool_name = tool_call.get('name', '')
             tool_args = tool_call.get('args', {})
-            
+            tool_call_id = tool_call.get('id', '')
+
             print(f"\n  Tool: {tool_name}")
             print(f"  Args: {tool_args}")
-            
+
             # Find and execute the tool
-            tool_result = None
+            tool_result = f"Tool {tool_name} not found"
             for tool in tools:
                 if tool.name == tool_name:
                     try:
@@ -169,15 +164,10 @@ Please provide a detailed response in the following JSON format:
                         tool_result = f"Error: {str(e)}"
                         print(f"  Status: Failed - {str(e)}")
                     break
-            
-            if tool_result is None:
-                tool_result = f"Tool {tool_name} not found"
-            
+
             # OBSERVATION: Add tool result back to conversation
-            # Agent will see this in next iteration
-            messages.append(("assistant", response))
-            messages.append(("tool", f"Tool: {tool_name}\nResult: {tool_result}"))
-        
+            messages.append(ToolMessage(content=tool_result, tool_call_id=tool_call_id))
+
         print(f"\nAgent will now process these results and decide next step...")
     
     # Max iterations reached
@@ -202,15 +192,16 @@ Please provide a detailed response in the following JSON format:
 def format_conversation(messages):
     """Helper to format conversation history for final prompt"""
     formatted = []
-    for role, content in messages:
-        if role == "system":
-            continue  # Skip system message
-        elif role == "human":
-            formatted.append(f"User: {content}")
-        elif role == "assistant":
+    for msg in messages:
+        if isinstance(msg, SystemMessage):
+            continue
+        elif isinstance(msg, HumanMessage):
+            formatted.append(f"User: {msg.content}")
+        elif isinstance(msg, AIMessage):
             formatted.append(f"Assistant: Chose tools to execute")
-        elif role == "tool":
-            formatted.append(f"Tool Result: {content[:500]}...")  # Truncate long results
+        elif isinstance(msg, ToolMessage):
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            formatted.append(f"Tool Result: {content[:500]}...")
     return "\n".join(formatted)
 
 
