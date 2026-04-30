@@ -8,8 +8,13 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.output_parsers import PydanticOutputParser
 from tools import event_search_tool, news_search_tool, save_tool, budget_tool
-from rag import RAGManager
 from datetime import datetime
+
+try:
+    from rag import RAGManager
+    RAG_AVAILABLE = True
+except Exception:
+    RAG_AVAILABLE = False
 from anthropic._exceptions import OverloadedError
 
 load_dotenv()
@@ -107,8 +112,12 @@ def init_llm():
 
 @st.cache_resource
 def init_rag():
-    # Downloads ~80MB HuggingFace model on first run, cached after that
-    return RAGManager()
+    if not RAG_AVAILABLE:
+        return None
+    try:
+        return RAGManager()
+    except Exception:
+        return None
 
 
 llm, llm_with_tools, parser, system_prompt, tools = init_llm()
@@ -144,8 +153,8 @@ def run_conversational_agent(user_input: str):
         search_params = agent_decision['params']
         event_type = search_params.get('event_type', 'events')
 
-        # 1. Check RAG cache first
-        cached = rag.retrieve_cached_search(user_input, search_params)
+        # 1. Check RAG cache first (only if RAG is available)
+        cached = rag.retrieve_cached_search(user_input, search_params) if rag else None
         if cached:
             results = _parse_cached_result(cached, user_input)
             source_label = "memory"
@@ -154,11 +163,12 @@ def run_conversational_agent(user_input: str):
             results = execute_search_with_context(search_params)
             source_label = "live"
             # 3. Cache the result for next time
-            if results and results.events_found:
+            if rag and results and results.events_found:
                 rag.store_search_result(user_input, format_search_results(results), search_params)
 
         # 4. Always update user preferences
-        rag.store_user_preference(event_type)
+        if rag:
+            rag.store_user_preference(event_type)
 
         st.session_state.user_context['current_results'] = results
         st.session_state.user_context['search_history'].append({
@@ -544,7 +554,7 @@ st.caption("Your conversational AI guide to Melbourne events")
 with st.sidebar:
     st.header("📊 Conversation Context")
     
-    top_prefs = rag.get_top_preferences()
+    top_prefs = rag.get_top_preferences() if rag else []
     if top_prefs:
         st.subheader("Your Top Interests")
         for pref in top_prefs:

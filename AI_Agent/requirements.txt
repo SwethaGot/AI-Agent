@@ -7,5 +7,6 @@ python-dotenv
 pydantic
 streamlit
 ddgs==9.10.0
-chromadb
+chromadb==0.4.24
 sentence-transformers
+protobuf==3.20.3
